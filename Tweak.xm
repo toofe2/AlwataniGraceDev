@@ -64,13 +64,13 @@ static void AGDInstallMKBadge(void) {
 }
 
 static BOOL AGDKeychainEntryExists(NSString *account, NSString *service, NSUInteger *valueLength) {
-    NSMutableDictionary *query = [@{
+    NSDictionary *query = @{
         (__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrAccount:account,
         (__bridge id)kSecAttrService:service,
         (__bridge id)kSecReturnData:@YES,
         (__bridge id)kSecMatchLimit:(__bridge id)kSecMatchLimitOne
-    } mutableCopy];
+    };
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
     if (status != errSecSuccess || !result) {
@@ -83,14 +83,20 @@ static BOOL AGDKeychainEntryExists(NSString *account, NSString *service, NSUInte
     return YES;
 }
 
+static NSString *AGDSelectedSubscriptionID(void) {
+    id value = [NSUserDefaults.standardUserDefaults objectForKey:@"flutter.selected_subscription_id"];
+    if (!value || value == [NSNull null]) return nil;
+    if ([value isKindOfClass:NSString.class]) return value;
+    if ([value respondsToSelector:@selector(stringValue)]) return [value stringValue];
+    return [value description];
+}
+
 static NSDictionary *AGDGraceReadiness(void) {
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    id subscription = [defaults objectForKey:@"flutter.selected_subscription_id"];
-    BOOL subscriptionPresent = (subscription != nil && subscription != [NSNull null]);
+    NSString *subscriptionID = AGDSelectedSubscriptionID();
     NSUInteger sessionLength = 0;
     BOOL sessionPresent = AGDKeychainEntryExists(@"auth_session", @"flutter_secure_storage_service", &sessionLength);
     return @{
-        @"subscriptionPresent": @(subscriptionPresent),
+        @"subscriptionPresent": @(subscriptionID.length > 0),
         @"sessionPresent": @(sessionPresent),
         @"sessionLength": @(sessionLength)
     };
@@ -104,13 +110,23 @@ static NSString *AGDGraceReadinessMessage(void) {
     return [NSString stringWithFormat:@"Selected subscription: %@\nAuthenticated session: %@\nSession payload length: %lu bytes\n\nNo credential values are displayed.", sub ? @"FOUND" : @"not found", session ? @"FOUND" : @"not found", (unsigned long)length];
 }
 
+static NSString *AGDRequestPreview(NSInteger days) {
+    NSString *subscriptionID = AGDSelectedSubscriptionID();
+    if (!subscriptionID.length) return @"Selected subscription ID is not available.";
+    NSString *path = [NSString stringWithFormat:@"/api/Subscriptions/%@/grace-days", subscriptionID];
+    NSDictionary *body = @{ @"graceDaysCount": @(days) };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSString *bodyString = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"{}";
+    return [NSString stringWithFormat:@"Method: POST\nHost: api.ftth.iq\nPath: %@\nBody: %@\nAuthorization: present in app session (value hidden)\n\nPreview only — no network request was sent.", path, bodyString];
+}
+
 static void AGDShowGraceDaysPrompt(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = AGDTopViewController();
         if (!root) return;
         NSDictionary *state = AGDGraceReadiness();
         BOOL ready = [state[@"subscriptionPresent"] boolValue] && [state[@"sessionPresent"] boolValue];
-        NSString *message = ready ? @"MK injection active. Enter a custom positive number of Grace Days. This development build only validates that the app has the required local session and subscription context; server-side validation remains unchanged." : @"Required app context is incomplete. Run Readiness Check first.";
+        NSString *message = ready ? @"MK injection active. Enter a custom positive number of Grace Days. This development build validates local context and can preview the exact request shape. It does not send or bypass server-side validation." : @"Required app context is incomplete. Run Readiness Check first.";
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV" message:message preferredStyle:UIAlertControllerStyleAlert];
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
             field.placeholder = @"Custom days";
@@ -119,22 +135,22 @@ static void AGDShowGraceDaysPrompt(void) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Readiness Check" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             AGDShowMessage(@"Grace Days Readiness", AGDGraceReadinessMessage());
         }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Send" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Preview Request" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             NSString *raw = alert.textFields.firstObject.text ?: @"";
             NSInteger days = raw.integerValue;
-            NSDictionary *current = AGDGraceReadiness();
-            BOOL currentReady = [current[@"subscriptionPresent"] boolValue] && [current[@"sessionPresent"] boolValue];
             if (days <= 0) {
                 AGDShowMessage(@"Grace Days — DEV", @"Enter a positive number of days.");
                 return;
             }
+            NSDictionary *current = AGDGraceReadiness();
+            BOOL currentReady = [current[@"subscriptionPresent"] boolValue] && [current[@"sessionPresent"] boolValue];
             if (!currentReady) {
-                AGDShowMessage(@"Grace Days — DEV", @"The app session/subscription context is not ready, so no test request was prepared.");
+                AGDShowMessage(@"Grace Days — DEV", @"The app session/subscription context is not ready.");
                 return;
             }
-            AGDShowMessage(@"Grace Days — DEV", [NSString stringWithFormat:@"Grace Days test input accepted: %ld days.\n\nLocal session/subscription context is available. No credential values were exposed and no server validation was bypassed.", (long)days]);
+            AGDShowMessage(@"Grace Days Request Preview", AGDRequestPreview(days));
         }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
         [root presentViewController:alert animated:YES completion:nil];
     });
 }
