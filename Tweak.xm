@@ -1,26 +1,88 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 
-static void AGDShowPanel(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = UIApplication.sharedApplication.keyWindow;
-        if (!window) {
-            for (UIWindow *candidate in UIApplication.sharedApplication.windows) {
-                if (!candidate.hidden && candidate.alpha > 0.0) { window = candidate; break; }
+static UIWindow *AGDActiveWindow(void) {
+    UIApplication *app = UIApplication.sharedApplication;
+
+    for (UIScene *scene in app.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        if (windowScene.activationState != UISceneActivationStateForegroundActive &&
+            windowScene.activationState != UISceneActivationStateForegroundInactive) {
+            continue;
+        }
+
+        for (UIWindow *window in windowScene.windows) {
+            if (window.isKeyWindow) return window;
+        }
+
+        for (UIWindow *window in windowScene.windows) {
+            if (!window.hidden && window.alpha > 0.0 && window.windowLevel == UIWindowLevelNormal) {
+                return window;
             }
         }
-        UIViewController *root = window.rootViewController;
-        while (root.presentedViewController) root = root.presentedViewController;
-        if (!root) return;
+    }
+
+    return nil;
+}
+
+static UIViewController *AGDTopViewController(void) {
+    UIWindow *window = AGDActiveWindow();
+    UIViewController *controller = window.rootViewController;
+    if (!controller) return nil;
+
+    while (YES) {
+        if (controller.presentedViewController) {
+            controller = controller.presentedViewController;
+            continue;
+        }
+
+        if ([controller isKindOfClass:UINavigationController.class]) {
+            UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
+            if (visible) {
+                controller = visible;
+                continue;
+            }
+        }
+
+        if ([controller isKindOfClass:UITabBarController.class]) {
+            UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
+            if (selected) {
+                controller = selected;
+                continue;
+            }
+        }
+
+        break;
+    }
+
+    return controller;
+}
+
+static void AGDShowPanel(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *root = AGDTopViewController();
+        if (!root) {
+            NSLog(@"[AlwataniGraceDev] no active view controller");
+            return;
+        }
 
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV"
                                                                        message:@"Developer test panel. This build does not bypass server validation."
                                                                 preferredStyle:UIAlertControllerStyleAlert];
+
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
             field.placeholder = @"Custom days";
             field.keyboardType = UIKeyboardTypeNumberPad;
+            field.autocorrectionType = UITextAutocorrectionTypeNo;
+            field.spellCheckingType = UITextSpellCheckingTypeNo;
         }];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
+
+        [alert addAction:[UIAlertAction actionWithTitle:@"Close"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+
         [root presentViewController:alert animated:YES completion:nil];
     });
 }
