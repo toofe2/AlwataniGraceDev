@@ -1,0 +1,46 @@
+name: Build AlwataniGraceDev
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev/alwatani-grace-dev
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Install ldid
+        run: |
+          brew install ldid
+
+      - name: Build tweak
+        run: |
+          make clean
+          make FINALPACKAGE=1
+
+      - name: Collect dylib
+        run: |
+          mkdir -p artifact
+          DYLIB=$(find .theos -type f -name 'AlwataniGraceDev.dylib' | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "AlwataniGraceDev.dylib not found"
+            find .theos -maxdepth 5 -type f | sort
+            exit 1
+          fi
+          cp "$DYLIB" artifact/AlwataniGraceDev.dylib
+          file artifact/AlwataniGraceDev.dylib
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: AlwataniGraceDev-dylib
+          path: artifact/AlwataniGraceDev.dylib
