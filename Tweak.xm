@@ -63,94 +63,84 @@ static void AGDInstallMKBadge(void) {
     });
 }
 
-static NSString *AGDStringify(id value) {
-    if (!value || value == [NSNull null]) return nil;
-    if ([value isKindOfClass:NSString.class]) return value;
-    if ([value isKindOfClass:NSData.class]) return [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
-    if ([value respondsToSelector:@selector(stringValue)]) return [value stringValue];
-    return [value description];
-}
-
-static BOOL AGDContainsAny(NSString *candidate, NSArray<NSString *> *needles) {
-    NSString *c = candidate.lowercaseString;
-    if (!c.length) return NO;
-    for (NSString *needle in needles) {
-        if ([c containsString:needle.lowercaseString]) return YES;
-    }
-    return NO;
-}
-
-static NSDictionary *AGDDefaultsInfo(void) {
-    NSDictionary *defaults = NSUserDefaults.standardUserDefaults.dictionaryRepresentation;
-    NSArray<NSString *> *tokenHints = @[@"token", @"access", @"auth", @"jwt", @"bearer"];
-    NSArray<NSString *> *subHints = @[@"subscription", @"selected_subscription", @"selectedsubscription", @"subscriptionid"];
-    NSMutableArray *tokenKeys = [NSMutableArray array];
-    NSMutableArray *subKeys = [NSMutableArray array];
-    for (NSString *key in defaults.allKeys) {
-        if (AGDContainsAny(key, tokenHints)) [tokenKeys addObject:key];
-        if (AGDContainsAny(key, subHints)) [subKeys addObject:key];
-    }
-    return @{ @"tokenKeys": tokenKeys, @"subKeys": subKeys };
-}
-
-static NSArray<NSDictionary *> *AGDAllKeychainItems(void) {
-    NSDictionary *query = @{
+static BOOL AGDKeychainEntryExists(NSString *account, NSString *service, NSUInteger *valueLength) {
+    NSMutableDictionary *query = [@{
         (__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecReturnAttributes:@YES,
-        (__bridge id)kSecMatchLimit:(__bridge id)kSecMatchLimitAll
-    };
+        (__bridge id)kSecAttrAccount:account,
+        (__bridge id)kSecAttrService:service,
+        (__bridge id)kSecReturnData:@YES,
+        (__bridge id)kSecMatchLimit:(__bridge id)kSecMatchLimitOne
+    } mutableCopy];
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (status != errSecSuccess || !result) return @[];
-    id obj = CFBridgingRelease(result);
-    if ([obj isKindOfClass:NSArray.class]) return obj;
-    if ([obj isKindOfClass:NSDictionary.class]) return @[obj];
-    return @[];
-}
-
-static NSString *AGDKeychainSummary(void) {
-    NSArray<NSString *> *tokenHints = @[@"token", @"access", @"auth", @"jwt", @"bearer"];
-    NSArray<NSString *> *subHints = @[@"subscription", @"selected_subscription", @"selectedsubscription", @"subscriptionid"];
-    NSMutableArray<NSString *> *hits = [NSMutableArray array];
-    for (NSDictionary *item in AGDAllKeychainItems()) {
-        NSString *account = AGDStringify(item[(__bridge id)kSecAttrAccount]) ?: @"";
-        NSString *service = AGDStringify(item[(__bridge id)kSecAttrService]) ?: @"";
-        if (AGDContainsAny(account, tokenHints) || AGDContainsAny(service, tokenHints) || AGDContainsAny(account, subHints) || AGDContainsAny(service, subHints)) {
-            NSString *masked = [NSString stringWithFormat:@"acct=%@ svc=%@", account.length ? account : @"-", service.length ? service : @"-"];
-            [hits addObject:masked];
-        }
+    if (status != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        if (valueLength) *valueLength = 0;
+        return NO;
     }
-    return hits.count ? [hits componentsJoinedByString:@"\n"] : @"No matching Keychain metadata";
+    NSData *data = CFBridgingRelease(result);
+    if (valueLength) *valueLength = [data isKindOfClass:NSData.class] ? data.length : 0;
+    return YES;
 }
 
-static NSString *AGDStorageDiagnostic(void) {
-    NSDictionary *info = AGDDefaultsInfo();
-    NSArray *tokenKeys = info[@"tokenKeys"];
-    NSArray *subKeys = info[@"subKeys"];
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    [lines addObject:[NSString stringWithFormat:@"NSUserDefaults token-like keys: %lu", (unsigned long)tokenKeys.count]];
-    if (tokenKeys.count) [lines addObject:[NSString stringWithFormat:@"%@", [tokenKeys componentsJoinedByString:@", "]]];
-    [lines addObject:[NSString stringWithFormat:@"NSUserDefaults subscription-like keys: %lu", (unsigned long)subKeys.count]];
-    if (subKeys.count) [lines addObject:[NSString stringWithFormat:@"%@", [subKeys componentsJoinedByString:@", "]]];
-    [lines addObject:@"Keychain metadata matches:"];
-    [lines addObject:AGDKeychainSummary()];
-    [lines addObject:@"Secret values are not displayed."];
-    return [lines componentsJoinedByString:@"\n"];
+static NSDictionary *AGDGraceReadiness(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    id subscription = [defaults objectForKey:@"flutter.selected_subscription_id"];
+    BOOL subscriptionPresent = (subscription != nil && subscription != [NSNull null]);
+    NSUInteger sessionLength = 0;
+    BOOL sessionPresent = AGDKeychainEntryExists(@"auth_session", @"flutter_secure_storage_service", &sessionLength);
+    return @{
+        @"subscriptionPresent": @(subscriptionPresent),
+        @"sessionPresent": @(sessionPresent),
+        @"sessionLength": @(sessionLength)
+    };
 }
 
-static void AGDShowPanel(void) {
+static NSString *AGDGraceReadinessMessage(void) {
+    NSDictionary *state = AGDGraceReadiness();
+    BOOL sub = [state[@"subscriptionPresent"] boolValue];
+    BOOL session = [state[@"sessionPresent"] boolValue];
+    NSUInteger length = [state[@"sessionLength"] unsignedIntegerValue];
+    return [NSString stringWithFormat:@"Selected subscription: %@\nAuthenticated session: %@\nSession payload length: %lu bytes\n\nNo credential values are displayed.", sub ? @"FOUND" : @"not found", session ? @"FOUND" : @"not found", (unsigned long)length];
+}
+
+static void AGDShowGraceDaysPrompt(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = AGDTopViewController();
         if (!root) return;
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV" message:@"Storage diagnostics updated after the first device check. This version searches broader session/subscription metadata names without displaying secrets." preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Storage Check" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { AGDShowMessage(@"MK Storage Check", AGDStorageDiagnostic()); }]];
+        NSDictionary *state = AGDGraceReadiness();
+        BOOL ready = [state[@"subscriptionPresent"] boolValue] && [state[@"sessionPresent"] boolValue];
+        NSString *message = ready ? @"MK injection active. Enter a custom positive number of Grace Days. This development build only validates that the app has the required local session and subscription context; server-side validation remains unchanged." : @"Required app context is incomplete. Run Readiness Check first.";
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV" message:message preferredStyle:UIAlertControllerStyleAlert];
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+            field.placeholder = @"Custom days";
+            field.keyboardType = UIKeyboardTypeNumberPad;
+        }];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Readiness Check" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            AGDShowMessage(@"Grace Days Readiness", AGDGraceReadinessMessage());
+        }]];
         [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Send" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            NSString *raw = alert.textFields.firstObject.text ?: @"";
+            NSInteger days = raw.integerValue;
+            NSDictionary *current = AGDGraceReadiness();
+            BOOL currentReady = [current[@"subscriptionPresent"] boolValue] && [current[@"sessionPresent"] boolValue];
+            if (days <= 0) {
+                AGDShowMessage(@"Grace Days — DEV", @"Enter a positive number of days.");
+                return;
+            }
+            if (!currentReady) {
+                AGDShowMessage(@"Grace Days — DEV", @"The app session/subscription context is not ready, so no test request was prepared.");
+                return;
+            }
+            AGDShowMessage(@"Grace Days — DEV", [NSString stringWithFormat:@"Grace Days test input accepted: %ld days.\n\nLocal session/subscription context is available. No credential values were exposed and no server validation was bypassed.", (long)days]);
+        }]];
         [root presentViewController:alert animated:YES completion:nil];
     });
 }
 
 %ctor {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ AGDInstallMKBadge(); });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ AGDShowPanel(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ AGDShowGraceDaysPrompt(); });
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { AGDInstallMKBadge(); }];
 }
