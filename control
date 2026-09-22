@@ -1,0 +1,9 @@
+Package: com.toofe2.alwatanigracedev
+Name: AlwataniGraceDev
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Developer instrumentation scaffold for Alwatani Grace Days testing.
+Maintainer: toofe2
+Author: toofe2
+Section: Tweaks
+Depends: firmware (>= 15.0)
