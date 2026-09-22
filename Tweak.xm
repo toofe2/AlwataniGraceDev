@@ -98,6 +98,45 @@ static void AGDInstallMKBadge(void) {
     });
 }
 
+static void AGDShowMessage(NSString *title, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *root = AGDTopViewController();
+        if (!root) return;
+
+        UIAlertController *result = [UIAlertController alertControllerWithTitle:title
+                                                                          message:message
+                                                                   preferredStyle:UIAlertControllerStyleAlert];
+        [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [root presentViewController:result animated:YES completion:nil];
+    });
+}
+
+static void AGDHandleSend(UITextField *field) {
+    NSString *raw = [field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (raw.length == 0) {
+        AGDShowMessage(@"Grace Days — DEV", @"Enter a positive whole number first.");
+        return;
+    }
+
+    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+    if ([raw rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
+        AGDShowMessage(@"Grace Days — DEV", @"Only whole positive numbers are accepted.");
+        return;
+    }
+
+    unsigned long long value = strtoull(raw.UTF8String, NULL, 10);
+    if (value == 0) {
+        AGDShowMessage(@"Grace Days — DEV", @"Value must be greater than zero.");
+        return;
+    }
+
+    // Stage 1 send action: validates and records the requested value. Network wiring is added separately
+    // once the exact authorized /grace-days request path is intercepted reliably.
+    NSLog(@"[AlwataniGraceDev] Send tapped. Requested graceDaysCount=%llu", value);
+    NSString *msg = [NSString stringWithFormat:@"Send button is active.\nRequested graceDaysCount: %llu\n\nNetwork dispatch is not wired yet, so no server request was sent in this build.", value];
+    AGDShowMessage(@"MK Send", msg);
+}
+
 static void AGDShowPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = AGDTopViewController();
@@ -107,7 +146,7 @@ static void AGDShowPanel(void) {
         }
 
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV"
-                                                                       message:@"MK injection active. Developer test panel. This build does not bypass server validation."
+                                                                       message:@"MK injection active. Enter a custom positive number of days."
                                                                 preferredStyle:UIAlertControllerStyleAlert];
 
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
@@ -116,6 +155,15 @@ static void AGDShowPanel(void) {
             field.autocorrectionType = UITextAutocorrectionTypeNo;
             field.spellCheckingType = UITextSpellCheckingTypeNo;
         }];
+
+        __weak UIAlertController *weakAlert = alert;
+        [alert addAction:[UIAlertAction actionWithTitle:@"Send"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
+            UIAlertController *strongAlert = weakAlert;
+            UITextField *field = strongAlert.textFields.firstObject;
+            AGDHandleSend(field);
+        }]];
 
         [alert addAction:[UIAlertAction actionWithTitle:@"Close"
                                                   style:UIAlertActionStyleCancel
