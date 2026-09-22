@@ -63,7 +63,7 @@ static void AGDInstallMKBadge(void) {
     });
 }
 
-static BOOL AGDKeychainEntryExists(NSString *account, NSString *service, NSUInteger *valueLength) {
+static NSData *AGDKeychainData(NSString *account, NSString *service) {
     NSDictionary *query = @{
         (__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrAccount:account,
@@ -75,12 +75,10 @@ static BOOL AGDKeychainEntryExists(NSString *account, NSString *service, NSUInte
     OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
     if (status != errSecSuccess || !result) {
         if (result) CFRelease(result);
-        if (valueLength) *valueLength = 0;
-        return NO;
+        return nil;
     }
-    NSData *data = CFBridgingRelease(result);
-    if (valueLength) *valueLength = [data isKindOfClass:NSData.class] ? data.length : 0;
-    return YES;
+    id obj = CFBridgingRelease(result);
+    return [obj isKindOfClass:NSData.class] ? obj : nil;
 }
 
 static NSString *AGDSelectedSubscriptionID(void) {
@@ -93,12 +91,11 @@ static NSString *AGDSelectedSubscriptionID(void) {
 
 static NSDictionary *AGDGraceReadiness(void) {
     NSString *subscriptionID = AGDSelectedSubscriptionID();
-    NSUInteger sessionLength = 0;
-    BOOL sessionPresent = AGDKeychainEntryExists(@"auth_session", @"flutter_secure_storage_service", &sessionLength);
+    NSData *sessionData = AGDKeychainData(@"auth_session", @"flutter_secure_storage_service");
     return @{
         @"subscriptionPresent": @(subscriptionID.length > 0),
-        @"sessionPresent": @(sessionPresent),
-        @"sessionLength": @(sessionLength)
+        @"sessionPresent": @(sessionData.length > 0),
+        @"sessionLength": @(sessionData.length)
     };
 }
 
@@ -107,17 +104,71 @@ static NSString *AGDGraceReadinessMessage(void) {
     BOOL sub = [state[@"subscriptionPresent"] boolValue];
     BOOL session = [state[@"sessionPresent"] boolValue];
     NSUInteger length = [state[@"sessionLength"] unsignedIntegerValue];
-    return [NSString stringWithFormat:@"Selected subscription: %@\nAuthenticated session: %@\nSession payload length: %lu bytes\n\nNo credential values are displayed.", sub ? @"FOUND" : @"not found", session ? @"FOUND" : @"not found", (unsigned long)length];
+    return [NSString stringWithFormat:@"Selected subscription: %@\nAuthenticated session: %@\nSession payload length: %lu bytes\n\nCredentials are used in-memory only for the app's own request and are not displayed.", sub ? @"FOUND" : @"not found", session ? @"FOUND" : @"not found", (unsigned long)length];
 }
 
-static NSString *AGDRequestPreview(NSInteger days) {
+static NSString *AGDAccessTokenFromSessionData(NSData *data) {
+    if (!data.length) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if ([json isKindOfClass:NSDictionary.class]) {
+        NSDictionary *dict = (NSDictionary *)json;
+        NSArray *keys = @[@"access_token", @"accessToken", @"token", @"jwt"];
+        for (NSString *key in keys) {
+            id value = dict[key];
+            if ([value isKindOfClass:NSString.class] && [value length] > 0) return value;
+        }
+        for (id value in dict.allValues) {
+            if ([value isKindOfClass:NSDictionary.class]) {
+                for (NSString *key in keys) {
+                    id nested = value[key];
+                    if ([nested isKindOfClass:NSString.class] && [nested length] > 0) return nested;
+                }
+            }
+        }
+    }
+    NSString *string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (string.length > 0 && [string rangeOfString:@" "].location == NSNotFound && [string componentsSeparatedByString:@"."].count >= 3) return string;
+    return nil;
+}
+
+static void AGDSendGraceDays(NSInteger days) {
     NSString *subscriptionID = AGDSelectedSubscriptionID();
-    if (!subscriptionID.length) return @"Selected subscription ID is not available.";
-    NSString *path = [NSString stringWithFormat:@"/api/Subscriptions/%@/grace-days", subscriptionID];
+    NSData *sessionData = AGDKeychainData(@"auth_session", @"flutter_secure_storage_service");
+    NSString *token = AGDAccessTokenFromSessionData(sessionData);
+    if (!subscriptionID.length || !token.length) {
+        AGDShowMessage(@"Grace Days — DEV", @"Could not prepare the authenticated request from the current app session.");
+        return;
+    }
+
+    NSString *urlString = [NSString stringWithFormat:@"https://api.ftth.iq/api/Subscriptions/%@/grace-days", subscriptionID];
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) {
+        AGDShowMessage(@"Grace Days — DEV", @"Invalid request URL.");
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"POST";
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     NSDictionary *body = @{ @"graceDaysCount": @(days) };
-    NSData *json = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    NSString *bodyString = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"{}";
-    return [NSString stringWithFormat:@"Method: POST\nHost: api.ftth.iq\nPath: %@\nBody: %@\nAuthorization: present in app session (value hidden)\n\nPreview only — no network request was sent.", path, bodyString];
+    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+
+    AGDShowMessage(@"Grace Days — DEV", @"Sending authenticated request…");
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            AGDShowMessage(@"Grace Days Response", [NSString stringWithFormat:@"Network error: %@", error.localizedDescription ?: @"Unknown error"]);
+            return;
+        }
+        NSInteger status = 0;
+        if ([response isKindOfClass:NSHTTPURLResponse.class]) status = ((NSHTTPURLResponse *)response).statusCode;
+        NSString *responseBody = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+        if (responseBody.length > 1200) responseBody = [[responseBody substringToIndex:1200] stringByAppendingString:@"…"];
+        NSString *message = [NSString stringWithFormat:@"HTTP %ld\n\n%@", (long)status, responseBody.length ? responseBody : @"(empty response)"];
+        AGDShowMessage(@"Grace Days Response", message);
+    }];
+    [task resume];
 }
 
 static void AGDShowGraceDaysPrompt(void) {
@@ -126,7 +177,7 @@ static void AGDShowGraceDaysPrompt(void) {
         if (!root) return;
         NSDictionary *state = AGDGraceReadiness();
         BOOL ready = [state[@"subscriptionPresent"] boolValue] && [state[@"sessionPresent"] boolValue];
-        NSString *message = ready ? @"MK injection active. Enter a custom positive number of Grace Days. This development build validates local context and can preview the exact request shape. It does not send or bypass server-side validation." : @"Required app context is incomplete. Run Readiness Check first.";
+        NSString *message = ready ? @"MK injection active. Enter a custom positive number of Grace Days. Send will use the app's current authenticated session and the selected subscription. Server-side authorization and validation remain unchanged." : @"Required app context is incomplete. Run Readiness Check first.";
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV" message:message preferredStyle:UIAlertControllerStyleAlert];
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
             field.placeholder = @"Custom days";
@@ -135,7 +186,7 @@ static void AGDShowGraceDaysPrompt(void) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Readiness Check" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             AGDShowMessage(@"Grace Days Readiness", AGDGraceReadinessMessage());
         }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Preview Request" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Send" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             NSString *raw = alert.textFields.firstObject.text ?: @"";
             NSInteger days = raw.integerValue;
             if (days <= 0) {
@@ -148,7 +199,10 @@ static void AGDShowGraceDaysPrompt(void) {
                 AGDShowMessage(@"Grace Days — DEV", @"The app session/subscription context is not ready.");
                 return;
             }
-            AGDShowMessage(@"Grace Days Request Preview", AGDRequestPreview(days));
+            UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Confirm Send" message:[NSString stringWithFormat:@"Send a real Grace Days request for %ld days using the current signed-in account and selected subscription?", (long)days] preferredStyle:UIAlertControllerStyleAlert];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Send" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) { AGDSendGraceDays(days); }]];
+            [AGDTopViewController() presentViewController:confirm animated:YES completion:nil];
         }]];
         [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
         [root presentViewController:alert animated:YES completion:nil];
