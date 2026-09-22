@@ -7,6 +7,6 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = AlwataniGraceDev
 AlwataniGraceDev_FILES = Tweak.xm
 AlwataniGraceDev_CFLAGS = -fobjc-arc
-AlwataniGraceDev_FRAMEWORKS = UIKit Foundation
+AlwataniGraceDev_FRAMEWORKS = UIKit Foundation Security
 
 include $(THEOS_MAKE_PATH)/tweak.mk
