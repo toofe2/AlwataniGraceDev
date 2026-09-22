@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <Security/Security.h>
 
 static NSInteger const kAGDBadgeTag = 0x4D4B44; // "MKD"
 
@@ -39,26 +40,16 @@ static UIViewController *AGDTopViewController(void) {
             controller = controller.presentedViewController;
             continue;
         }
-
         if ([controller isKindOfClass:UINavigationController.class]) {
             UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
-            if (visible) {
-                controller = visible;
-                continue;
-            }
+            if (visible) { controller = visible; continue; }
         }
-
         if ([controller isKindOfClass:UITabBarController.class]) {
             UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
-            if (selected) {
-                controller = selected;
-                continue;
-            }
+            if (selected) { controller = selected; continue; }
         }
-
         break;
     }
-
     return controller;
 }
 
@@ -89,8 +80,7 @@ static void AGDInstallMKBadge(void) {
 
         UIEdgeInsets insets = window.safeAreaInsets;
         CGFloat top = MAX(insets.top + 8.0, 12.0);
-        CGFloat left = 12.0;
-        badge.frame = CGRectMake(left, top, 46.0, 30.0);
+        badge.frame = CGRectMake(12.0, top, 46.0, 30.0);
 
         [window addSubview:badge];
         [window bringSubviewToFront:badge];
@@ -102,13 +92,129 @@ static void AGDShowMessage(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = AGDTopViewController();
         if (!root) return;
-
         UIAlertController *result = [UIAlertController alertControllerWithTitle:title
                                                                           message:message
                                                                    preferredStyle:UIAlertControllerStyleAlert];
         [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [root presentViewController:result animated:YES completion:nil];
     });
+}
+
+static NSString *AGDStringFromDefaults(NSString *key) {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+    if (!value || value == [NSNull null]) return nil;
+    if ([value isKindOfClass:NSString.class]) return (NSString *)value;
+    if ([value respondsToSelector:@selector(stringValue)]) return [value stringValue];
+    return [value description];
+}
+
+static NSString *AGDStringFromKeychain(NSString *account) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrAccount: account,
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+    };
+
+    CFTypeRef item = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &item);
+    if (status != errSecSuccess || !item) return nil;
+
+    NSData *data = (__bridge_transfer NSData *)item;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+static NSString *AGDResolveAccessToken(void) {
+    NSArray<NSString *> *keys = @[@"user_access_token", @"access_token", @"accessToken"];
+    for (NSString *key in keys) {
+        NSString *value = AGDStringFromDefaults(key);
+        if (value.length > 0) return value;
+    }
+    for (NSString *key in keys) {
+        NSString *value = AGDStringFromKeychain(key);
+        if (value.length > 0) return value;
+    }
+    return nil;
+}
+
+static NSString *AGDResolveSubscriptionID(void) {
+    NSArray<NSString *> *keys = @[@"selected_subscription_id", @"subscriptionId", @"subscription_id"];
+    for (NSString *key in keys) {
+        NSString *value = AGDStringFromDefaults(key);
+        if (value.length > 0) return value;
+    }
+    for (NSString *key in keys) {
+        NSString *value = AGDStringFromKeychain(key);
+        if (value.length > 0) return value;
+    }
+    return nil;
+}
+
+static void AGDSendGraceDays(unsigned long long value) {
+    NSString *token = AGDResolveAccessToken();
+    NSString *subscriptionID = AGDResolveSubscriptionID();
+
+    if (token.length == 0) {
+        AGDShowMessage(@"MK Send", @"Access token was not found in the app storage. No request was sent.");
+        return;
+    }
+    if (subscriptionID.length == 0) {
+        AGDShowMessage(@"MK Send", @"Selected subscription ID was not found in the app storage. No request was sent.");
+        return;
+    }
+
+    NSString *escapedID = [subscriptionID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
+    NSString *urlString = [NSString stringWithFormat:@"https://api.ftth.iq/api/Subscriptions/%@/grace-days", escapedID];
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) {
+        AGDShowMessage(@"MK Send", @"Could not build the Grace Days URL.");
+        return;
+    }
+
+    NSDictionary *payload = @{@"graceDaysCount": @(value)};
+    NSError *jsonError = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
+    if (!body || jsonError) {
+        AGDShowMessage(@"MK Send", [NSString stringWithFormat:@"JSON error: %@", jsonError.localizedDescription ?: @"unknown"]);
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = body;
+    request.timeoutInterval = 30.0;
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+
+    NSString *auth = token;
+    if (![auth.lowercaseString hasPrefix:@"bearer "]) {
+        auth = [@"Bearer " stringByAppendingString:auth];
+    }
+    [request setValue:auth forHTTPHeaderField:@"Authorization"];
+
+    NSLog(@"[AlwataniGraceDev] POST %@ graceDaysCount=%llu", urlString, value);
+    AGDShowMessage(@"MK Send", [NSString stringWithFormat:@"Sending graceDaysCount: %llu\nSubscription: %@", value, subscriptionID]);
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+                                                                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            AGDShowMessage(@"MK Server Response", [NSString stringWithFormat:@"Network error:\n%@", error.localizedDescription ?: @"unknown"]);
+            return;
+        }
+
+        NSInteger status = 0;
+        if ([response isKindOfClass:NSHTTPURLResponse.class]) {
+            status = ((NSHTTPURLResponse *)response).statusCode;
+        }
+
+        NSString *bodyText = data.length > 0 ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"<empty body>";
+        if (!bodyText) bodyText = [NSString stringWithFormat:@"<%lu bytes>", (unsigned long)data.length];
+
+        NSString *message = [NSString stringWithFormat:@"Requested: %llu\nHTTP: %ld\n\n%@", value, (long)status, bodyText];
+        NSLog(@"[AlwataniGraceDev] response HTTP=%ld body=%@", (long)status, bodyText);
+        AGDShowMessage(@"MK Server Response", message);
+    }];
+    [task resume];
 }
 
 static void AGDHandleSend(UITextField *field) {
@@ -130,11 +236,8 @@ static void AGDHandleSend(UITextField *field) {
         return;
     }
 
-    // Stage 1 send action: validates and records the requested value. Network wiring is added separately
-    // once the exact authorized /grace-days request path is intercepted reliably.
     NSLog(@"[AlwataniGraceDev] Send tapped. Requested graceDaysCount=%llu", value);
-    NSString *msg = [NSString stringWithFormat:@"Send button is active.\nRequested graceDaysCount: %llu\n\nNetwork dispatch is not wired yet, so no server request was sent in this build.", value];
-    AGDShowMessage(@"MK Send", msg);
+    AGDSendGraceDays(value);
 }
 
 static void AGDShowPanel(void) {
@@ -146,7 +249,7 @@ static void AGDShowPanel(void) {
         }
 
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Grace Days — DEV"
-                                                                       message:@"MK injection active. Enter a custom positive number of days."
+                                                                       message:@"MK injection active. Enter a custom positive number of days. Server validation remains unchanged."
                                                                 preferredStyle:UIAlertControllerStyleAlert];
 
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
@@ -165,10 +268,7 @@ static void AGDShowPanel(void) {
             AGDHandleSend(field);
         }]];
 
-        [alert addAction:[UIAlertAction actionWithTitle:@"Close"
-                                                  style:UIAlertActionStyleCancel
-                                                handler:nil]];
-
+        [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
         [root presentViewController:alert animated:YES completion:nil];
     });
 }
