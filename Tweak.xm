@@ -155,7 +155,6 @@ static void AGDSendGraceDays(NSInteger days) {
     NSDictionary *body = @{ @"graceDaysCount": @(days) };
     request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
 
-    AGDShowMessage(@"Grace Days — DEV", @"Sending authenticated request…");
     NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error) {
             AGDShowMessage(@"Grace Days Response", [NSString stringWithFormat:@"Network error: %@", error.localizedDescription ?: @"Unknown error"]);
